@@ -42,6 +42,9 @@
       <button [class.active]="activeView === 'versions'" (click)="activeView = 'versions'">
         <span>04</span><strong>锁定与比较</strong><small>冻结、紧急修订、差异</small>
       </button>
+      <button [class.active]="activeView === 'handover'" (click)="activeView = 'handover'">
+        <span>05</span><strong>值班交接</strong><small>交接码生成与接收</small>
+      </button>
     </nav>
 
     <div *ngIf="draft.emergencyRevision" class="emergency-banner">
@@ -289,6 +292,91 @@
             </nb-card-body>
           </nb-card>
         </div>
+      </div>
+    </section>
+
+    <section *ngIf="activeView === 'handover'" class="view-section">
+      <div class="section-heading">
+        <div><span class="eyebrow">值班交接</span><h2>离线交接码：生成、传递与接收</h2><p>交接码包含标题、语言版本、逐句讨论、角色确认与完整版本链，可通过聊天记录或文本文件离线传递。</p></div>
+      </div>
+      <nb-alert status="success" *ngIf="handoverNotice">{{ handoverNotice }}</nb-alert>
+      <div class="handover-layout">
+        <div class="main-column">
+          <nb-card class="panel">
+            <nb-card-header>
+              <div><span class="section-kicker">值班员</span><h3>生成交接码</h3></div>
+              <span class="status-pill" [class.locked]="isLocked">{{ statusLabel(draft.status) }}</span>
+            </nb-card-header>
+            <nb-card-body>
+              <p class="muted">将当前草稿（{{ draft.languages.length }} 个语言版本 · {{ draft.discussions.length }} 条讨论 · {{ draft.versions.length }} 个历史版本）打包为一段文本，交给接班员粘贴解析。</p>
+              <div class="handover-generate">
+                <button nbButton status="primary" (click)="generateHandover()">生成交接码</button>
+                <button nbButton status="basic" [disabled]="!handoverCode" (click)="copyHandover()">复制交接码</button>
+                <span class="muted" *ngIf="handoverCode">共 {{ handoverCode.length }} 个字符，可整段粘贴到聊天记录</span>
+              </div>
+              <textarea #handoverCodeArea class="handover-code" readonly rows="6" [value]="handoverCode" placeholder="点击“生成交接码”后，此处会出现可离线传递的文本。"></textarea>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel" *ngIf="handoverPreview as preview">
+            <nb-card-header>
+              <div><span class="section-kicker">来件预览</span><h3>{{ preview.draft.title || '未命名通知' }}</h3></div>
+              <span class="status-pill" [class.locked]="preview.draft.status === 'locked'">{{ statusLabel(preview.draft.status) }}</span>
+            </nb-card-header>
+            <nb-card-body>
+              <div class="handover-meta">
+                <div><span>草稿编号</span><strong>{{ preview.draft.id }}</strong></div>
+                <div><span>版本</span><strong>{{ preview.draft.version }}</strong></div>
+                <div><span>来件更新时间</span><strong>{{ formatDateTime(preview.draft.updatedAt) }}</strong></div>
+                <div><span>交接码导出时间</span><strong>{{ formatDateTime(preview.exportedAt) }}</strong></div>
+              </div>
+
+              <nb-alert status="danger" *ngIf="handoverBlockedByLock">本机草稿已锁定，锁定版本不能被来件覆盖。如需采用来件，请先通过紧急修订解除锁定，或确认保留本机。</nb-alert>
+              <nb-alert status="warning" *ngIf="handoverNeedsChoice && !handoverBlockedByLock">本机同编号草稿（{{ formatDateTime(draft.updatedAt) }}）比交接码（{{ formatDateTime(preview.draft.updatedAt) }}）更新。请先选择保留本机，或确认采用来件。</nb-alert>
+              <nb-alert status="info" *ngIf="!handoverSameNotice && !handoverBlockedByLock">来件编号与本机草稿不同，采用后本机当前草稿将被整体替换（可通过撤销恢复）。</nb-alert>
+
+              <div class="todo-groups">
+                <div class="todo-group" *ngFor="let group of preview.todos">
+                  <header><strong>{{ group.kind }}</strong><span class="count-pill" [class.danger]="group.danger">{{ group.items.length }}</span></header>
+                  <ul *ngIf="group.items.length"><li *ngFor="let item of group.items">{{ item }}</li></ul>
+                  <p class="muted" *ngIf="!group.items.length">无待办</p>
+                </div>
+              </div>
+              <p class="muted" *ngIf="handoverTodoEmpty">来件没有未解决的待办事项，可直接继续编辑或进入锁定流程。</p>
+
+              <div class="handover-actions" *ngIf="!handoverBlockedByLock">
+                <button nbButton status="danger" *ngIf="handoverNeedsChoice" (click)="adoptHandover()">采用来件（覆盖较新的本机草稿）</button>
+                <button nbButton status="primary" *ngIf="!handoverNeedsChoice" (click)="adoptHandover()">采用来件</button>
+                <button nbButton status="basic" (click)="discardHandover()">{{ handoverNeedsChoice ? '保留本机' : '取消' }}</button>
+              </div>
+              <div class="handover-actions" *ngIf="handoverBlockedByLock">
+                <button nbButton status="basic" (click)="discardHandover()">保留本机</button>
+              </div>
+            </nb-card-body>
+          </nb-card>
+        </div>
+
+        <aside class="side-column">
+          <nb-card class="panel compact">
+            <nb-card-header><div><span class="section-kicker">接班员</span><h3>接收交接码</h3></div></nb-card-header>
+            <nb-card-body>
+              <textarea nbInput fullWidth rows="5" [(ngModel)]="handoverInput" placeholder="粘贴值班员发来的交接码（HO1. 开头）"></textarea>
+              <button nbButton fullWidth status="primary" (click)="parseHandover()">解析交接码</button>
+              <nb-alert status="danger" *ngIf="handoverError">{{ handoverError }}</nb-alert>
+              <p class="muted">解析后先展示待办摘要，确认采用才会写入；校验失败时本机草稿保持不变。</p>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel compact">
+            <nb-card-header><div><span class="section-kicker">流程</span><h3>交接步骤</h3></div></nb-card-header>
+            <nb-card-body class="workflow-list">
+              <div class="done"><span>1</span><p><strong>值班员生成交接码</strong>打包草稿、讨论与版本链</p></div>
+              <div class="done"><span>2</span><p><strong>离线传递</strong>粘贴到聊天记录或存入文本</p></div>
+              <div class="done"><span>3</span><p><strong>接班员解析</strong>先看待办摘要再决定是否采用</p></div>
+              <div class="done"><span>4</span><p><strong>冲突人工选择</strong>锁定版本不会被来件覆盖</p></div>
+            </nb-card-body>
+          </nb-card>
+        </aside>
       </div>
     </section>
   </nb-layout-column>

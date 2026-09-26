@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { Component, HostListener, OnInit } from '@angular/core';
+import { Component, ElementRef, HostListener, OnInit, ViewChild } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import {
   NbAlertModule,
@@ -17,7 +17,7 @@ import {
   NbToastrService
 } from '@nebular/theme';
 
-type WorkspaceView = 'compose' | 'checks' | 'review' | 'versions';
+type WorkspaceView = 'compose' | 'checks' | 'review' | 'versions' | 'handover';
 type ReviewStatus = 'pending' | 'approved' | 'changes';
 type NoticeStatus = 'draft' | 'in-review' | 'locked';
 type CheckLevel = 'error' | 'warning' | 'info';
@@ -115,7 +115,34 @@ interface NoticeTemplate {
   body: Record<string, string>;
 }
 
+interface HandoverEnvelope {
+  app: string;
+  format: number;
+  id: string;
+  title: string;
+  version: string;
+  exportedAt: string;
+  updatedAt: string;
+  checksum: string;
+  draft: NoticeDraft;
+}
+
+interface HandoverTodoGroup {
+  kind: string;
+  danger?: boolean;
+  items: string[];
+}
+
+interface HandoverPreview {
+  draft: NoticeDraft;
+  exportedAt: string;
+  todos: HandoverTodoGroup[];
+}
+
 const STORAGE_KEY = 'sologsb-1025-emergency-notice-v1';
+const HANDOVER_PREFIX = 'HO1.';
+const HANDOVER_APP = 'sologsb-1025-handover';
+const HANDOVER_FORMAT = 1;
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -312,6 +339,13 @@ export class AppComponent implements OnInit {
   lastSavedAt = '';
   history: NoticeDraft[] = [];
   future: NoticeDraft[] = [];
+  handoverCode = '';
+  handoverInput = '';
+  handoverError = '';
+  handoverNotice = '';
+  handoverPreview: HandoverPreview | null = null;
+
+  @ViewChild('handoverCodeArea') private handoverCodeArea?: ElementRef<HTMLTextAreaElement>;
 
   constructor(private readonly toastr: NbToastrService) {}
 
@@ -368,71 +402,7 @@ export class AppComponent implements OnInit {
   }
 
   get checks(): CheckResult[] {
-    const checks: CheckResult[] = [];
-    const requiredMeta: Array<[string, string]> = [
-      ['标题', this.draft.title], ['事件类型', this.draft.eventType], ['严重程度', this.draft.severity],
-      ['影响范围', this.draft.scope], ['事件时间', this.draft.eventAt], ['生效时间', this.draft.effectiveAt],
-      ['失效时间', this.draft.expiresAt]
-    ];
-    requiredMeta.filter(([, value]) => !value).forEach(([label]) => checks.push({
-      id: `meta-${label}`, category: '必填信息', level: 'error', title: `缺少${label}`,
-      detail: `请补全通知的${label}后再提交发布。`
-    }));
-    if (!this.draft.channels.length) checks.push({
-      id: 'channels', category: '发布渠道', level: 'error', title: '未选择目标渠道', detail: '至少选择一个目标发布渠道。'
-    });
-
-    this.draft.requiredLocales.forEach((locale) => {
-      if (!this.draft.languages.some((language) => language.id === locale)) {
-        const name = this.locales.find((item) => item.id === locale)?.name ?? locale;
-        checks.push({
-          id: `missing-${locale}`, category: '语言完整性', level: 'error', title: `${name}版本缺失`,
-          detail: '该语言属于本次发布的必需语言，请添加并完成翻译。'
-        });
-      }
-    });
-
-    this.draft.languages.forEach((language) => {
-      if (!language.title.trim() || !language.body.trim()) checks.push({
-        id: `required-${language.id}`, category: '必填信息', level: 'error', title: `${language.name}内容不完整`,
-        detail: '语言版本必须包含标题和正文。'
-      });
-      if (!language.reviewed) checks.push({
-        id: `review-${language.id}`, category: '版本审阅', level: language.id === 'ja' ? 'warning' : 'info',
-        title: `${language.name}尚未完成语言复核`, detail: '发布前应确认措辞、术语和本地化表达。'
-      });
-      const banned = this.bannedTerms.filter((term) => language.body.includes(term));
-      if (banned.length) checks.push({
-        id: `banned-${language.id}`, category: '禁用词', level: 'error', title: `${language.name}包含禁用词`,
-        detail: `请替换：${banned.join('、')}。`
-      });
-      const inconsistent = this.glossary.filter((entry) => {
-        const variantCount = entry.variants.filter((variant) => language.body.includes(variant)).length;
-        return variantCount > 0 && (!language.body.includes(entry.canonical) || variantCount > 1);
-      });
-      if (inconsistent.length) checks.push({
-        id: `term-${language.id}`, category: '术语一致性', level: 'warning', title: `${language.name}术语不统一`,
-        detail: inconsistent.map((item) => `统一使用“${item.canonical}”，避免“${item.variants.join('、')}”`).join('；')
-      });
-    });
-
-    const eventAt = this.toTime(this.draft.eventAt);
-    const effectiveAt = this.toTime(this.draft.effectiveAt);
-    const expiresAt = this.toTime(this.draft.expiresAt);
-    if (eventAt && effectiveAt && effectiveAt < eventAt) checks.push({
-      id: 'time-effective', category: '时间冲突', level: 'warning', title: '生效时间早于事件时间',
-      detail: '请确认这是预防性通知；否则调整事件时间或生效时间。'
-    });
-    if (effectiveAt && expiresAt && expiresAt <= effectiveAt) checks.push({
-      id: 'time-expires', category: '时间冲突', level: 'error', title: '失效时间早于生效时间',
-      detail: '通知有效期必须晚于生效时间。'
-    });
-    const unresolved = this.draft.discussions.filter((discussion) => !discussion.resolved).length;
-    if (unresolved) checks.push({
-      id: 'discussions', category: '逐句讨论', level: 'warning', title: `${unresolved} 条讨论尚未解决`,
-      detail: '发布前请处理或明确忽略未解决讨论。'
-    });
-    return checks;
+    return this.computeChecks(this.draft);
   }
 
   get blockingChecks(): CheckResult[] {
@@ -636,6 +606,111 @@ export class AppComponent implements OnInit {
     this.persist();
   }
 
+  get handoverSameNotice(): boolean {
+    return !!this.handoverPreview && this.handoverPreview.draft.id === this.draft.id;
+  }
+
+  get handoverLocalNewer(): boolean {
+    const preview = this.handoverPreview;
+    if (!preview || !this.handoverSameNotice) return false;
+    return this.toTime(this.draft.updatedAt) > this.toTime(preview.draft.updatedAt);
+  }
+
+  get handoverNeedsChoice(): boolean {
+    return this.handoverSameNotice && this.handoverLocalNewer;
+  }
+
+  get handoverBlockedByLock(): boolean {
+    return !!this.handoverPreview && this.isLocked;
+  }
+
+  get handoverTodoEmpty(): boolean {
+    return !!this.handoverPreview && this.handoverPreview.todos.every((group) => !group.items.length);
+  }
+
+  statusLabel(status: NoticeStatus): string {
+    return status === 'locked' ? '已锁定' : status === 'in-review' ? '审阅中' : '草稿中';
+  }
+
+  generateHandover(): void {
+    this.saveNow();
+    const payload = clone(this.draft);
+    const envelope: HandoverEnvelope = {
+      app: HANDOVER_APP,
+      format: HANDOVER_FORMAT,
+      id: payload.id,
+      title: payload.title,
+      version: payload.version,
+      exportedAt: new Date().toISOString(),
+      updatedAt: payload.updatedAt,
+      checksum: this.checksum(JSON.stringify(payload)),
+      draft: payload
+    };
+    this.handoverCode = HANDOVER_PREFIX + this.base64Encode(JSON.stringify(envelope));
+    this.handoverNotice = '';
+    this.toastr.success('交接码已生成，复制后可离线传递给接班员。', '生成成功');
+  }
+
+  async copyHandover(): Promise<void> {
+    if (!this.handoverCode) return;
+    try {
+      await navigator.clipboard.writeText(this.handoverCode);
+      this.toastr.success('交接码已复制，可粘贴到聊天记录或文本文件。', '复制成功');
+    } catch {
+      this.handoverCodeArea?.nativeElement.select();
+      this.toastr.info('浏览器未允许自动复制，已选中全文，请手动复制。', '请手动复制');
+    }
+  }
+
+  parseHandover(): void {
+    this.handoverError = '';
+    this.handoverNotice = '';
+    this.handoverPreview = null;
+    const result = this.decodeHandover(this.handoverInput);
+    if (!result.ok) {
+      this.handoverError = result.reason;
+      return;
+    }
+    this.handoverPreview = {
+      draft: result.draft,
+      exportedAt: result.exportedAt,
+      todos: this.buildHandoverTodos(result.draft)
+    };
+  }
+
+  adoptHandover(): void {
+    const preview = this.handoverPreview;
+    if (!preview) return;
+    if (this.isLocked) {
+      this.toastr.danger('本机草稿已锁定，锁定版本不能被来件覆盖。', '已拒绝采用');
+      return;
+    }
+    this.history.push(clone(this.draft));
+    if (this.history.length > 50) this.history.shift();
+    this.draft = this.migrate(clone(preview.draft));
+    this.future = [];
+    if (!this.draft.languages.some((language) => language.id === this.selectedLanguageId)) {
+      this.selectedLanguageId = this.draft.languages[0]?.id ?? 'zh-CN';
+    }
+    this.selectedSentenceIndex = 0;
+    this.compareBaseId = this.draft.versions.at(-2)?.id ?? '';
+    this.compareTargetId = this.draft.versions.at(-1)?.id ?? '';
+    this.persist();
+    this.handoverPreview = null;
+    this.handoverInput = '';
+    this.handoverError = '';
+    this.handoverCode = '';
+    this.handoverNotice = `已采用来件「${this.draft.title}」：标题、语言版本、逐句讨论、角色确认与版本链已完整恢复。`;
+    this.toastr.success('来件已完整恢复为本机草稿，可通过撤销回到采用前状态。', '采用成功');
+  }
+
+  discardHandover(): void {
+    const hadPreview = !!this.handoverPreview;
+    this.handoverPreview = null;
+    this.handoverError = '';
+    if (hadPreview) this.handoverNotice = '已保留本机草稿，来件内容未生效。';
+  }
+
   formatDateTime(value: string): string {
     if (!value) return '未设置';
     const date = new Date(value);
@@ -670,6 +745,168 @@ export class AppComponent implements OnInit {
     value.reviews ??= [];
     value.requiredLocales ??= ['zh-CN'];
     return value;
+  }
+
+  private computeChecks(draft: NoticeDraft): CheckResult[] {
+    const checks: CheckResult[] = [];
+    const requiredMeta: Array<[string, string]> = [
+      ['标题', draft.title], ['事件类型', draft.eventType], ['严重程度', draft.severity],
+      ['影响范围', draft.scope], ['事件时间', draft.eventAt], ['生效时间', draft.effectiveAt],
+      ['失效时间', draft.expiresAt]
+    ];
+    requiredMeta.filter(([, value]) => !value).forEach(([label]) => checks.push({
+      id: `meta-${label}`, category: '必填信息', level: 'error', title: `缺少${label}`,
+      detail: `请补全通知的${label}后再提交发布。`
+    }));
+    if (!draft.channels.length) checks.push({
+      id: 'channels', category: '发布渠道', level: 'error', title: '未选择目标渠道', detail: '至少选择一个目标发布渠道。'
+    });
+
+    draft.requiredLocales.forEach((locale) => {
+      if (!draft.languages.some((language) => language.id === locale)) {
+        const name = this.locales.find((item) => item.id === locale)?.name ?? locale;
+        checks.push({
+          id: `missing-${locale}`, category: '语言完整性', level: 'error', title: `${name}版本缺失`,
+          detail: '该语言属于本次发布的必需语言，请添加并完成翻译。'
+        });
+      }
+    });
+
+    draft.languages.forEach((language) => {
+      if (!language.title.trim() || !language.body.trim()) checks.push({
+        id: `required-${language.id}`, category: '必填信息', level: 'error', title: `${language.name}内容不完整`,
+        detail: '语言版本必须包含标题和正文。'
+      });
+      if (!language.reviewed) checks.push({
+        id: `review-${language.id}`, category: '版本审阅', level: language.id === 'ja' ? 'warning' : 'info',
+        title: `${language.name}尚未完成语言复核`, detail: '发布前应确认措辞、术语和本地化表达。'
+      });
+      const banned = this.bannedTerms.filter((term) => language.body.includes(term));
+      if (banned.length) checks.push({
+        id: `banned-${language.id}`, category: '禁用词', level: 'error', title: `${language.name}包含禁用词`,
+        detail: `请替换：${banned.join('、')}。`
+      });
+      const inconsistent = this.glossary.filter((entry) => {
+        const variantCount = entry.variants.filter((variant) => language.body.includes(variant)).length;
+        return variantCount > 0 && (!language.body.includes(entry.canonical) || variantCount > 1);
+      });
+      if (inconsistent.length) checks.push({
+        id: `term-${language.id}`, category: '术语一致性', level: 'warning', title: `${language.name}术语不统一`,
+        detail: inconsistent.map((item) => `统一使用“${item.canonical}”，避免“${item.variants.join('、')}”`).join('；')
+      });
+    });
+
+    const eventAt = this.toTime(draft.eventAt);
+    const effectiveAt = this.toTime(draft.effectiveAt);
+    const expiresAt = this.toTime(draft.expiresAt);
+    if (eventAt && effectiveAt && effectiveAt < eventAt) checks.push({
+      id: 'time-effective', category: '时间冲突', level: 'warning', title: '生效时间早于事件时间',
+      detail: '请确认这是预防性通知；否则调整事件时间或生效时间。'
+    });
+    if (effectiveAt && expiresAt && expiresAt <= effectiveAt) checks.push({
+      id: 'time-expires', category: '时间冲突', level: 'error', title: '失效时间早于生效时间',
+      detail: '通知有效期必须晚于生效时间。'
+    });
+    const unresolved = draft.discussions.filter((discussion) => !discussion.resolved).length;
+    if (unresolved) checks.push({
+      id: 'discussions', category: '逐句讨论', level: 'warning', title: `${unresolved} 条讨论尚未解决`,
+      detail: '发布前请处理或明确忽略未解决讨论。'
+    });
+    return checks;
+  }
+
+  private buildHandoverTodos(source: NoticeDraft): HandoverTodoGroup[] {
+    const languageName = (id: string): string =>
+      source.languages.find((language) => language.id === id)?.name
+      ?? this.locales.find((locale) => locale.id === id)?.name
+      ?? id;
+    const discussions = source.discussions
+      .filter((discussion) => !discussion.resolved)
+      .map((discussion) => `${languageName(discussion.languageId)}第 ${discussion.sentenceIndex + 1} 句 · ${discussion.author}（${discussion.role}）：${discussion.text}`);
+    const reviews = source.reviews
+      .filter((review) => review.status !== 'approved')
+      .map((review) => `${review.role}（${review.owner}）${review.status === 'changes' ? '退回要求修改' : '尚未确认'}${review.note ? `：${review.note}` : ''}`);
+    const missing = source.requiredLocales
+      .filter((locale) => !source.languages.some((language) => language.id === locale))
+      .map((locale) => `${this.locales.find((item) => item.id === locale)?.name ?? locale} 为必需语言，版本缺失`);
+    const unreviewed = source.languages
+      .filter((language) => !language.reviewed)
+      .map((language) => `${language.name} 尚未完成语言复核（译者：${language.translator || '未填写'}）`);
+    const blocking = this.computeChecks(source)
+      .filter((check) => check.level === 'error')
+      .map((check) => `${check.title}：${check.detail}`);
+    return [
+      { kind: '未解决讨论', items: discussions },
+      { kind: '角色确认', items: reviews },
+      { kind: '语言版本', items: [...missing, ...unreviewed] },
+      { kind: '发布检查阻断', danger: true, items: blocking }
+    ];
+  }
+
+  private decodeHandover(raw: string): { ok: true; draft: NoticeDraft; exportedAt: string } | { ok: false; reason: string } {
+    const compact = (raw ?? '').replace(/\s+/g, '');
+    if (!compact) return { ok: false, reason: '交接码为空：请先粘贴值班员生成的完整交接码。' };
+    if (!compact.startsWith(HANDOVER_PREFIX)) {
+      return { ok: false, reason: `无法识别：这不是本工具生成的交接码（缺少 ${HANDOVER_PREFIX} 前缀），请确认复制完整。` };
+    }
+    const body = compact.slice(HANDOVER_PREFIX.length);
+    if (!/^[A-Za-z0-9+/=]+$/.test(body)) {
+      return { ok: false, reason: '交接码包含非法字符，可能在传递过程中被改动，请重新复制完整内容。' };
+    }
+    let envelope: HandoverEnvelope;
+    try {
+      envelope = JSON.parse(this.base64Decode(body)) as HandoverEnvelope;
+    } catch {
+      return { ok: false, reason: '交接码已损坏或不完整，无法解析；本机草稿未受影响。' };
+    }
+    if (!envelope || envelope.app !== HANDOVER_APP) {
+      return { ok: false, reason: '交接码来源不符：这不是本工具导出的交接包，已拒绝导入。' };
+    }
+    if (envelope.format !== HANDOVER_FORMAT) {
+      return { ok: false, reason: `交接码格式版本（${envelope.format ?? '未知'}）不受支持，请确认交接双方使用同一版本的工具。` };
+    }
+    if (typeof envelope.id !== 'string' || typeof envelope.updatedAt !== 'string'
+      || typeof envelope.checksum !== 'string' || !envelope.draft) {
+      return { ok: false, reason: '交接码缺少必要字段（草稿编号、更新时间或校验和），内容不可信，已拒绝导入。' };
+    }
+    if (this.checksum(JSON.stringify(envelope.draft)) !== envelope.checksum) {
+      return { ok: false, reason: '校验和不一致：交接码可能被截断或篡改，已拒绝导入，本机草稿保持不变。' };
+    }
+    const draft = envelope.draft;
+    const structureOk = typeof draft.id === 'string' && draft.id === envelope.id
+      && typeof draft.title === 'string' && typeof draft.version === 'string'
+      && Array.isArray(draft.languages) && draft.languages.length > 0
+      && Array.isArray(draft.versions) && Array.isArray(draft.discussions) && Array.isArray(draft.reviews);
+    if (!structureOk) {
+      return { ok: false, reason: '交接码内的草稿结构不完整（缺少标题、语言版本或版本链），已拒绝导入。' };
+    }
+    return {
+      ok: true,
+      draft: this.migrate(clone(draft)),
+      exportedAt: typeof envelope.exportedAt === 'string' ? envelope.exportedAt : ''
+    };
+  }
+
+  private base64Encode(text: string): string {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+    return btoa(binary);
+  }
+
+  private base64Decode(text: string): string {
+    const binary = atob(text);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  }
+
+  private checksum(text: string): string {
+    const bytes = new TextEncoder().encode(text);
+    let hash = 0x811c9dc5;
+    bytes.forEach((byte) => {
+      hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+    });
+    return hash.toString(16).padStart(8, '0');
   }
 
   private splitSentences(text: string): string[] {
