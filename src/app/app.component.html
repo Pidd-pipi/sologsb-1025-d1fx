@@ -9,6 +9,8 @@
     </div>
     <div class="header-actions">
       <span class="save-state"><span class="status-dot" [class.locked]="isLocked"></span>本地自动保存 {{ lastSavedAt }}</span>
+      <button nbButton status="warning" size="small" (click)="openHandoff('export')">生成交接码</button>
+      <button nbButton status="info" size="small" (click)="openHandoff('import')">接班接收</button>
       <button nbButton status="basic" size="small" (click)="undo()" [disabled]="!history.length">撤销 ⌘Z</button>
       <button nbButton status="basic" size="small" (click)="redo()" [disabled]="!future.length">重做 ⌘Y</button>
       <button nbButton status="success" size="small" (click)="saveNow()">保存草稿</button>
@@ -292,4 +294,116 @@
       </div>
     </section>
   </nb-layout-column>
+
+  <div class="handoff-overlay" *ngIf="handoffPanelOpen" (click.self)="closeHandoff()">
+    <div class="handoff-dialog" role="dialog" aria-modal="true" aria-label="值班交接">
+      <header class="handoff-head">
+        <div>
+          <span class="eyebrow">值班交接</span>
+          <h3>离线交接码 · 不经过服务器</h3>
+        </div>
+        <button nbButton status="basic" size="tiny" (click)="closeHandoff()">关闭 ✕</button>
+      </header>
+
+      <div class="handoff-tabs">
+        <button [class.active]="handoffMode === 'export'" (click)="handoffMode = 'export'">交班 · 生成交接码</button>
+        <button [class.active]="handoffMode === 'import'" (click)="handoffMode = 'import'">接班 · 粘贴接收</button>
+      </div>
+
+      <!-- 交班 -->
+      <div class="handoff-body" *ngIf="handoffMode === 'export'">
+        <nb-alert status="info">交接码包含完整草稿：标题、各语言版本、逐句讨论、角色确认和整条版本链。纯文本可离线转发，内置校验码防截断。</nb-alert>
+        <label class="field handoff-from"><span>交班值班员</span>
+          <input nbInput fullWidth [(ngModel)]="handoffFrom" placeholder="例如：值班一组 林晓">
+        </label>
+        <div class="handoff-actions">
+          <button nbButton status="primary" (click)="generateHandoff()">{{ handoffCode ? '重新生成（含最新改动）' : '生成交接码' }}</button>
+          <button nbButton status="success" [disabled]="!handoffCode" (click)="copyHandoff()">复制交接码</button>
+          <span class="muted" *ngIf="handoffCode">约 {{ handoffCodeSize }}，可整段粘贴到聊天窗口</span>
+        </div>
+        <textarea class="handoff-code" *ngIf="handoffCode" readonly [value]="handoffCode" rows="9"
+          (click)="selectText($event)" placeholder="交接码将显示在这里"></textarea>
+      </div>
+
+      <!-- 接班 -->
+      <div class="handoff-body" *ngIf="handoffMode === 'import'">
+        <label class="field"><span>粘贴交班员发来的交接码</span>
+          <textarea class="handoff-code" rows="5" [(ngModel)]="handoffImportText" placeholder="ENH1-……"></textarea>
+        </label>
+        <div class="handoff-actions">
+          <button nbButton status="primary" [disabled]="!handoffImportText.trim()" (click)="inspectHandoff()">校验并查看待办</button>
+          <button nbButton status="basic" (click)="handoffImportText = ''; handoffImportError = ''">清空</button>
+        </div>
+
+        <nb-alert status="danger" *ngIf="handoffImportError" class="handoff-error">
+          <strong>交接码校验失败</strong>
+          <p>{{ handoffImportError }}</p>
+          <p class="muted">本机原草稿保持不变，未做任何修改。</p>
+        </nb-alert>
+
+        <ng-container *ngIf="handoffParsed && incomingDraft as incoming">
+          <!-- 待办摘要 -->
+          <section class="handoff-summary">
+            <header>
+              <div>
+                <span class="eyebrow">待办摘要</span>
+                <h4>{{ incoming.title || '未命名通知' }}</h4>
+              </div>
+              <span class="status-pill" [class.locked]="incoming.status === 'locked'">
+                {{ incoming.status === 'locked' ? '来件已锁定' : incoming.status === 'in-review' ? '审阅中' : '草稿' }}
+              </span>
+            </header>
+            <div class="handoff-meta">
+              <div><span>交班人</span><strong>{{ handoffParsed.envelope.from }}</strong></div>
+              <div><span>交接生成</span><strong>{{ formatDateTime(handoffParsed.envelope.exportedAt) }}</strong></div>
+              <div><span>草稿更新</span><strong>{{ formatDateTime(incoming.updatedAt) }}</strong></div>
+              <div><span>版本号</span><strong>{{ incoming.version }}</strong></div>
+              <div><span>语言版本</span><strong>{{ incoming.languages.length }} 个</strong></div>
+              <div><span>版本链</span><strong>{{ incoming.versions.length }} 条</strong></div>
+            </div>
+            <div class="handoff-counts">
+              <span class="danger-text">{{ handoffTodo?.blockingCount ?? 0 }} 项阻断</span>
+              <span class="warning-text">{{ handoffTodo?.discussionCount ?? 0 }} 条未解决讨论</span>
+              <span>{{ handoffTodo?.pendingReviewCount ?? 0 }} 个角色未确认</span>
+            </div>
+
+            <ul class="todo-list">
+              <li *ngFor="let item of handoffTodo?.items" [class]="'todo-' + item.kind">
+                <b>{{ item.kind === 'blocking' ? '阻断' : item.kind === 'discussion' ? '讨论' : item.kind === 'review' ? '角色' : item.kind === 'language' ? '语言' : '提示' }}</b>
+                <div><strong>{{ item.title }}</strong><p>{{ item.detail }}</p></div>
+              </li>
+              <li *ngIf="handoffTodo && !handoffTodo.items.length" class="todo-empty">没有待决事项，通知已具备发布条件。</li>
+            </ul>
+          </section>
+
+          <!-- 同编号且本机更新：必须先选择 -->
+          <nb-alert status="warning" *ngIf="localIsNewer" class="conflict-alert">
+            <strong>发现同编号草稿，本机版本更新</strong>
+            <p>本机更新于 {{ formatDateTime(draft.updatedAt) }}，交接码更新于 {{ formatDateTime(incoming.updatedAt) }}。请先选择保留本机还是采用来件，未选择前不会改动本机草稿。</p>
+            <div class="conflict-choice">
+              <button nbButton status="basic" (click)="keepLocalDraft()">保留本机（放弃来件）</button>
+              <button nbButton status="warning" (click)="adoptIncoming()">仍采用来件（覆盖本机）</button>
+            </div>
+          </nb-alert>
+
+          <ng-container *ngIf="!localIsNewer">
+            <nb-alert status="warning" *ngIf="!isSameNotice" class="conflict-alert">
+              <strong>这是另一份通知</strong>
+              <p>来件编号“{{ incoming.id }}”与本机草稿编号“{{ draft.id }}”不同，采用后会整体替换本机当前草稿（可通过撤销找回）。</p>
+            </nb-alert>
+            <nb-alert status="info" *ngIf="handoffProtectedVersions.length" class="conflict-alert">
+              <strong>本机锁定版本不会被覆盖</strong>
+              <p>检测到 {{ handoffProtectedVersions.length }} 个本机锁定快照，采用来件时将原样保留在版本链中：
+                <ng-container *ngFor="let version of handoffProtectedVersions">{{ version.version }}（{{ version.label }}）；</ng-container>
+              </p>
+            </nb-alert>
+            <div class="handoff-actions adopt-row">
+              <button nbButton status="success" (click)="adoptIncoming()">采用来件并完整恢复</button>
+              <button nbButton status="basic" (click)="keepLocalDraft()">取消，保留本机</button>
+            </div>
+          </ng-container>
+        </ng-container>
+      </div>
+    </div>
+  </div>
 </nb-layout>

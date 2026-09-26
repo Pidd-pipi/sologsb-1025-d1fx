@@ -178,3 +178,43 @@ blockquote { margin: 0 0 15px; padding: 15px 18px; border-left: 4px solid #ef835
   .header-actions { justify-content: flex-start; }
   .discussion-compose, .version-summary article { grid-template-columns: 1fr; }
 }
+
+/* 值班交接弹窗 */
+.handoff-overlay { position: fixed; inset: 0; z-index: 1040; display: grid; place-items: center; padding: 28px 16px; background: rgba(13, 35, 40, .55); backdrop-filter: blur(2px); overflow-y: auto; }
+.handoff-dialog { width: min(760px, 100%); max-height: 88vh; overflow-y: auto; border-radius: 18px; background: #fff; box-shadow: 0 30px 80px rgba(10, 35, 42, .35); }
+.handoff-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 24px 12px; }
+.handoff-head h3 { margin: 0; color: #173e48; font-size: 19px; }
+.handoff-tabs { display: flex; gap: 6px; padding: 0 24px; border-bottom: 1px solid #e9efef; }
+.handoff-tabs button { border: 0; border-bottom: 3px solid transparent; padding: 10px 16px; color: #607780; background: transparent; cursor: pointer; font-weight: 600; }
+.handoff-tabs button.active { color: #194c55; border-color: #ef8354; }
+.handoff-body { padding: 18px 24px 24px; display: grid; gap: 14px; }
+.handoff-from { max-width: 320px; }
+.handoff-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.handoff-code { width: 100%; padding: 13px 14px; border: 1px solid #cfdddd; border-radius: 12px; outline: 0; resize: vertical; background: #f7fafa; color: #253b43; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.7; word-break: break-all; }
+.handoff-code:focus { border-color: #3c7b83; box-shadow: 0 0 0 3px rgba(60,123,131,.12); }
+.handoff-code[readonly] { background: #f2f7f7; }
+.handoff-error p { margin: 4px 0 0; }
+.handoff-summary { border: 1px solid #e2eaea; border-radius: 14px; padding: 16px 18px; display: grid; gap: 13px; background: #fafcfc; }
+.handoff-summary > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.handoff-summary h4 { margin: 2px 0 0; color: #173e48; font-size: 17px; }
+.handoff-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.handoff-meta div { padding: 9px 12px; border-radius: 10px; background: #fff; border: 1px solid #e7eded; }
+.handoff-meta span { display: block; color: #7b8f95; font-size: 10px; }
+.handoff-meta strong { display: block; margin-top: 2px; color: #324b53; font-size: 13px; }
+.handoff-counts { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; font-weight: 700; }
+.todo-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 240px; overflow-y: auto; }
+.todo-list li { display: grid; grid-template-columns: 46px 1fr; gap: 10px; align-items: start; padding: 10px 12px; border-radius: 10px; background: #fff; border: 1px solid #e7eded; border-left: 4px solid #9aacb0; }
+.todo-list li.todo-blocking { border-left-color: #cc5b46; }
+.todo-list li.todo-discussion { border-left-color: #dc9c4a; }
+.todo-list li.todo-review { border-left-color: #3c7b83; }
+.todo-list li.todo-language { border-left-color: #5d95b1; }
+.todo-list li.todo-info { border-left-color: #2d9572; }
+.todo-list li > b { display: grid; place-items: center; padding: 3px 0; border-radius: 6px; background: #edf2f2; color: #557078; font-size: 10px; }
+.todo-list strong { color: #2d444c; font-size: 13px; }
+.todo-list p { margin: 2px 0 0; color: #71848a; font-size: 12px; line-height: 1.55; }
+.todo-empty { color: #678b7d; font-size: 12px; }
+.conflict-alert .conflict-choice { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.adopt-row { margin-top: 2px; }
+@media (max-width: 760px) {
+  .handoff-meta { grid-template-columns: 1fr 1fr; }
+}

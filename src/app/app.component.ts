@@ -16,106 +16,29 @@ import {
   NbToastrModule,
   NbToastrService
 } from '@nebular/theme';
-
-type WorkspaceView = 'compose' | 'checks' | 'review' | 'versions';
-type ReviewStatus = 'pending' | 'approved' | 'changes';
-type NoticeStatus = 'draft' | 'in-review' | 'locked';
-type CheckLevel = 'error' | 'warning' | 'info';
-
-interface LanguageVersion {
-  id: string;
-  locale: string;
-  name: string;
-  title: string;
-  body: string;
-  translator: string;
-  reviewed: boolean;
-}
-
-interface Discussion {
-  id: string;
-  languageId: string;
-  sentenceIndex: number;
-  author: string;
-  role: string;
-  text: string;
-  createdAt: string;
-  resolved: boolean;
-}
-
-interface RoleReview {
-  role: '编辑' | '法务' | '翻译' | '发布人';
-  owner: string;
-  status: ReviewStatus;
-  note: string;
-}
-
-interface VersionSnapshot {
-  id: string;
-  label: string;
-  createdAt: string;
-  version: string;
-  title: string;
-  severity: string;
-  scope: string;
-  eventAt: string;
-  effectiveAt: string;
-  expiresAt: string;
-  channels: string[];
-  languages: LanguageVersion[];
-  note: string;
-  emergency: boolean;
-}
-
-interface NoticeDraft {
-  id: string;
-  title: string;
-  eventType: string;
-  severity: string;
-  scope: string;
-  channels: string[];
-  eventAt: string;
-  effectiveAt: string;
-  expiresAt: string;
-  requiredLocales: string[];
-  languages: LanguageVersion[];
-  discussions: Discussion[];
-  reviews: RoleReview[];
-  versions: VersionSnapshot[];
-  status: NoticeStatus;
-  version: string;
-  lockedAt?: string;
-  emergencyRevision: boolean;
-  updatedAt: string;
-}
-
-interface CheckResult {
-  id: string;
-  category: string;
-  level: CheckLevel;
-  title: string;
-  detail: string;
-}
-
-interface DiffRow {
-  left: string;
-  right: string;
-  kind: 'same' | 'changed' | 'added' | 'removed';
-}
-
-interface NoticeTemplate {
-  id: string;
-  name: string;
-  description: string;
-  eventType: string;
-  severity: string;
-  scope: string;
-  channels: string[];
-  title: Record<string, string>;
-  body: Record<string, string>;
-}
-
-const STORAGE_KEY = 'sologsb-1025-emergency-notice-v1';
+import {
+  buildHandoffTodo,
+  encodeHandoff,
+  HandoffError,
+  HandoffTodo,
+  isLockedSnapshot,
+  mergeVersionChains,
+  parseHandoff,
+  ParsedHandoff
+} from './handoff';
+import {
+  CheckResult,
+  DiffRow,
+  Discussion,
+  LanguageVersion,
+  NoticeDraft,
+  NoticeTemplate,
+  ReviewStatus,
+  RoleReview,
+  STORAGE_KEY,
+  VersionSnapshot,
+  WorkspaceView
+} from './notice.model';
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -313,6 +236,17 @@ export class AppComponent implements OnInit {
   history: NoticeDraft[] = [];
   future: NoticeDraft[] = [];
 
+  // 值班交接
+  handoffPanelOpen = false;
+  handoffMode: 'export' | 'import' = 'export';
+  handoffFrom = '';
+  handoffCode = '';
+  handoffImportText = '';
+  handoffImportError = '';
+  handoffParsed: ParsedHandoff | null = null;
+  handoffTodo: HandoffTodo | null = null;
+  handoffProtectedVersions: VersionSnapshot[] = [];
+
   constructor(private readonly toastr: NbToastrService) {}
 
   ngOnInit(): void {
@@ -368,22 +302,26 @@ export class AppComponent implements OnInit {
   }
 
   get checks(): CheckResult[] {
+    return this.buildChecks(this.draft);
+  }
+
+  private buildChecks(draft: NoticeDraft): CheckResult[] {
     const checks: CheckResult[] = [];
     const requiredMeta: Array<[string, string]> = [
-      ['标题', this.draft.title], ['事件类型', this.draft.eventType], ['严重程度', this.draft.severity],
-      ['影响范围', this.draft.scope], ['事件时间', this.draft.eventAt], ['生效时间', this.draft.effectiveAt],
-      ['失效时间', this.draft.expiresAt]
+      ['标题', draft.title], ['事件类型', draft.eventType], ['严重程度', draft.severity],
+      ['影响范围', draft.scope], ['事件时间', draft.eventAt], ['生效时间', draft.effectiveAt],
+      ['失效时间', draft.expiresAt]
     ];
     requiredMeta.filter(([, value]) => !value).forEach(([label]) => checks.push({
       id: `meta-${label}`, category: '必填信息', level: 'error', title: `缺少${label}`,
       detail: `请补全通知的${label}后再提交发布。`
     }));
-    if (!this.draft.channels.length) checks.push({
+    if (!draft.channels.length) checks.push({
       id: 'channels', category: '发布渠道', level: 'error', title: '未选择目标渠道', detail: '至少选择一个目标发布渠道。'
     });
 
-    this.draft.requiredLocales.forEach((locale) => {
-      if (!this.draft.languages.some((language) => language.id === locale)) {
+    draft.requiredLocales.forEach((locale) => {
+      if (!draft.languages.some((language) => language.id === locale)) {
         const name = this.locales.find((item) => item.id === locale)?.name ?? locale;
         checks.push({
           id: `missing-${locale}`, category: '语言完整性', level: 'error', title: `${name}版本缺失`,
@@ -392,7 +330,7 @@ export class AppComponent implements OnInit {
       }
     });
 
-    this.draft.languages.forEach((language) => {
+    draft.languages.forEach((language) => {
       if (!language.title.trim() || !language.body.trim()) checks.push({
         id: `required-${language.id}`, category: '必填信息', level: 'error', title: `${language.name}内容不完整`,
         detail: '语言版本必须包含标题和正文。'
@@ -416,9 +354,9 @@ export class AppComponent implements OnInit {
       });
     });
 
-    const eventAt = this.toTime(this.draft.eventAt);
-    const effectiveAt = this.toTime(this.draft.effectiveAt);
-    const expiresAt = this.toTime(this.draft.expiresAt);
+    const eventAt = this.toTime(draft.eventAt);
+    const effectiveAt = this.toTime(draft.effectiveAt);
+    const expiresAt = this.toTime(draft.expiresAt);
     if (eventAt && effectiveAt && effectiveAt < eventAt) checks.push({
       id: 'time-effective', category: '时间冲突', level: 'warning', title: '生效时间早于事件时间',
       detail: '请确认这是预防性通知；否则调整事件时间或生效时间。'
@@ -427,7 +365,7 @@ export class AppComponent implements OnInit {
       id: 'time-expires', category: '时间冲突', level: 'error', title: '失效时间早于生效时间',
       detail: '通知有效期必须晚于生效时间。'
     });
-    const unresolved = this.draft.discussions.filter((discussion) => !discussion.resolved).length;
+    const unresolved = draft.discussions.filter((discussion) => !discussion.resolved).length;
     if (unresolved) checks.push({
       id: 'discussions', category: '逐句讨论', level: 'warning', title: `${unresolved} 条讨论尚未解决`,
       detail: '发布前请处理或明确忽略未解决讨论。'
@@ -574,7 +512,7 @@ export class AppComponent implements OnInit {
       id: uid('version'), label: '最终锁定版本', createdAt: new Date().toISOString(), version: this.nextVersion,
       title: this.draft.title, severity: this.draft.severity, scope: this.draft.scope, eventAt: this.draft.eventAt,
       effectiveAt: this.draft.effectiveAt, expiresAt: this.draft.expiresAt, channels: [...this.draft.channels],
-      languages: clone(this.draft.languages), note: '发布前检查通过并锁定。', emergency: false
+      languages: clone(this.draft.languages), note: '发布前检查通过并锁定。', emergency: false, locked: true
     };
     this.commit((draft) => {
       draft.versions.push(snapshot);
@@ -632,6 +570,138 @@ export class AppComponent implements OnInit {
     this.persist();
   }
 
+  /* ------------------------------ 值班交接 ------------------------------ */
+
+  openHandoff(mode: 'export' | 'import'): void {
+    this.handoffMode = mode;
+    this.handoffPanelOpen = true;
+  }
+
+  closeHandoff(): void {
+    this.handoffPanelOpen = false;
+  }
+
+  generateHandoff(): void {
+    this.handoffCode = encodeHandoff(clone(this.draft), this.handoffFrom || '值班员', new Date().toISOString());
+  }
+
+  get handoffCodeSize(): string {
+    if (!this.handoffCode) return '0 KB';
+    return `${(new Blob([this.handoffCode]).size / 1024).toFixed(1)} KB`;
+  }
+
+  copyHandoff(): void {
+    if (!this.handoffCode) return;
+    const fallback = (): void => {
+      this.toastr.warning('浏览器拒绝了自动复制，请手动全选文本框内容复制。', '需要手动复制');
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(this.handoffCode).then(
+        () => this.toastr.success('交接码已复制，可离线粘贴给接班员。', '复制成功'),
+        fallback
+      );
+    } else {
+      fallback();
+    }
+  }
+
+  selectText(event: Event): void {
+    (event.target as HTMLTextAreaElement | null)?.select();
+  }
+
+  inspectHandoff(): void {
+    this.handoffImportError = '';
+    this.handoffParsed = null;
+    this.handoffTodo = null;
+    this.handoffProtectedVersions = [];
+    try {
+      const parsed = parseHandoff(this.handoffImportText);
+      this.handoffParsed = parsed;
+      this.handoffTodo = buildHandoffTodo(parsed.draft, this.buildChecks(parsed.draft));
+      // 预览合并结果，仅用于提示哪些本机锁定版本会被保留
+      this.handoffProtectedVersions = mergeVersionChains(this.draft.versions, parsed.draft.versions).protectedLocal;
+    } catch (error) {
+      this.handoffImportError = error instanceof HandoffError
+        ? error.message
+        : '交接码解析失败：内容无法识别，请确认粘贴完整。';
+    }
+  }
+
+  get incomingDraft(): NoticeDraft | null {
+    return this.handoffParsed?.draft ?? null;
+  }
+
+  /** 同编号：同一份通知在两台机器之间交接。 */
+  get isSameNotice(): boolean {
+    return !!this.incomingDraft && this.incomingDraft.id === this.draft.id;
+  }
+
+  /** 本机同编号草稿比交接码新（updatedAt 更新）。 */
+  get localIsNewer(): boolean {
+    if (!this.incomingDraft || !this.isSameNotice) return false;
+    const localTime = new Date(this.draft.updatedAt).getTime();
+    const incomingTime = new Date(this.incomingDraft.updatedAt).getTime();
+    return Number.isFinite(localTime) && Number.isFinite(incomingTime) && localTime > incomingTime;
+  }
+
+  keepLocalDraft(): void {
+    this.handoffPanelOpen = false;
+    this.handoffParsed = null;
+    this.handoffTodo = null;
+    this.handoffImportText = '';
+    this.handoffImportError = '';
+    this.toastr.info('已保留本机草稿，交接码内容未写入。', '已放弃来件');
+  }
+
+  adoptIncoming(): void {
+    if (!this.handoffParsed) return;
+    const incoming = clone(this.handoffParsed.draft);
+    const merge = mergeVersionChains(clone(this.draft.versions), incoming.versions);
+
+    incoming.versions = merge.versions;
+    // 状态必须与版本链中的锁定稿一致：锁定快照只增不减，来件无法“解锁”本机版本
+    const hasLocked = incoming.versions.some((version) => isLockedSnapshot(version));
+    if (incoming.status === 'locked' && !hasLocked) incoming.status = 'in-review';
+    if (hasLocked && !incoming.lockedAt) {
+      const latestLocked = incoming.versions.filter((version) => isLockedSnapshot(version)).at(-1);
+      incoming.lockedAt = latestLocked?.createdAt;
+    }
+    if (this.isSameNotice && this.localIsNewer) {
+      incoming.updatedAt = new Date().toISOString();
+    }
+
+    // 放弃来件前本机草稿可通过撤销找回
+    this.history.push(clone(this.draft));
+    if (this.history.length > 50) this.history.shift();
+    this.draft = incoming;
+    this.future = [];
+    this.persist();
+
+    this.selectedLanguageId = this.draft.languages.some((language) => language.id === this.selectedLanguageId)
+      ? this.selectedLanguageId
+      : this.draft.languages[0]?.id ?? 'zh-CN';
+    if (this.selectedSentenceIndex >= this.currentSentences.length) this.selectedSentenceIndex = 0;
+    this.compareBaseId = this.draft.versions.at(-2)?.id ?? '';
+    this.compareTargetId = this.draft.versions.at(-1)?.id ?? '';
+    this.lastSavedAt = this.formatDateTime(this.draft.updatedAt);
+
+    this.handoffPanelOpen = false;
+    this.handoffParsed = null;
+    this.handoffTodo = null;
+    this.handoffImportText = '';
+    this.handoffImportError = '';
+    this.activeView = 'review';
+
+    if (merge.protectedLocal.length) {
+      this.toastr.warning(
+        `来件已恢复；本机 ${merge.protectedLocal.length} 个锁定版本受保护，未被覆盖，可在版本链中查看。`,
+        '锁定版本已保留'
+      );
+    } else {
+      this.toastr.success('标题、语言版本、逐句讨论、角色确认与版本链已完整恢复。', '交接恢复完成');
+    }
+  }
+
   saveNow(): void {
     this.persist();
   }
@@ -669,6 +739,10 @@ export class AppComponent implements OnInit {
     value.discussions ??= [];
     value.reviews ??= [];
     value.requiredLocales ??= ['zh-CN'];
+    // 老版本数据没有 locked 字段：按锁定标签兜底标记，保证交接保护对历史数据生效
+    value.versions.forEach((version) => {
+      if (version.locked === undefined) version.locked = version.label === '最终锁定版本';
+    });
     return value;
   }
 
